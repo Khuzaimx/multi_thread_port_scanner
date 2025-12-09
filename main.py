@@ -2,9 +2,9 @@ import sys
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QLineEdit, QPushButton, 
                              QTableWidget, QTableWidgetItem, QComboBox, QMessageBox,
-                             QHeaderView, QCheckBox, QFileDialog)
+                             QHeaderView, QCheckBox, QFileDialog, QSplitter, QTextEdit)
 import csv
-from PyQt5.QtCore import QThread, Qt
+from PyQt5.QtCore import QThread, Qt, QTime
 from PyQt5.QtGui import QColor
 import scanner
 import utils
@@ -53,6 +53,12 @@ class MainWindow(QMainWindow):
         self.show_closed_cb.setChecked(True)
         input_layout.addWidget(self.show_closed_cb)
         
+        # Active Penetration Checkbox
+        self.active_probe_cb = QCheckBox("Active Penetration (Slow)")
+        self.active_probe_cb.setStyleSheet("color: red; font-weight: bold")
+        self.active_probe_cb.setToolTip("Sends payloads to test for misconfigurations")
+        input_layout.addWidget(self.active_probe_cb)
+        
         layout.addLayout(input_layout)
         
         # Control Buttons
@@ -71,12 +77,31 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(self.export_btn)
         layout.addLayout(btn_layout)
         
+        # Splitter Logic
+        splitter = QSplitter(Qt.Vertical)
+        
         # Results Table
         self.table = QTableWidget()
         self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(["Port", "Status", "Service/Banner", "OS Guess", "Vulnerabilities"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        layout.addWidget(self.table)
+        splitter.addWidget(self.table)
+        
+        # Log Console
+        console_widget = QWidget()
+        console_layout = QVBoxLayout(console_widget)
+        console_layout.setContentsMargins(0, 5, 0, 0)
+        console_layout.addWidget(QLabel("Penetration Log Console:"))
+        self.log_console = QTextEdit()
+        self.log_console.setReadOnly(True)
+        self.log_console.setStyleSheet("background-color: #1e1e1e; color: #00ff00; font-family: Consolas, Monospace;")
+        console_layout.addWidget(self.log_console)
+        splitter.addWidget(console_widget)
+        
+        splitter.setStretchFactor(0, 3) # Table larger
+        splitter.setStretchFactor(1, 1)
+        
+        layout.addWidget(splitter)
         
         # Status Bar
         self.status_label = QLabel("Ready")
@@ -111,8 +136,10 @@ class MainWindow(QMainWindow):
              # Basic check if user might not be admin (not foolproof, but a hint)
              pass 
 
-        # Clear Table
+        # Clear Table & Console
         self.table.setRowCount(0)
+        self.log_console.clear()
+        self.log_console.append(f"[*] Starting scan on {target} ({ip})...")
         self.status_label.setText(f"Scanning {target} ({ip}) from port {start_port} to {end_port}...")
         
         # Disable inputs
@@ -120,8 +147,9 @@ class MainWindow(QMainWindow):
 
         # Setup Thread and Worker
         show_closed = self.show_closed_cb.isChecked()
+        active_probe = self.active_probe_cb.isChecked()
         self.thread = QThread()
-        self.worker = scanner.ScannerWorker(ip, start_port, end_port, scan_type=scan_type, show_closed=show_closed)
+        self.worker = scanner.ScannerWorker(ip, start_port, end_port, scan_type=scan_type, show_closed=show_closed, active_probe=active_probe)
         self.worker.moveToThread(self.thread)
         
         # Connect Signals
@@ -197,9 +225,16 @@ class MainWindow(QMainWindow):
         vuln_item = QTableWidgetItem(result['vulns'])
         if result['vulns']:
             vuln_item.setForeground(QColor("red"))
-            # Highlight whole row if critical?
-            # status_item.setBackground(QColor("mistyrose")) 
         self.table.setItem(row, 4, vuln_item)
+        
+        # Append Logs
+        if 'logs' in result and result['logs']:
+             timestamp = QTime.currentTime().toString("HH:mm:ss")
+             for log in result['logs']:
+                 self.log_console.append(f"[{timestamp}] [Port {result['port']}] {log}")
+             # If critical findings, maybe highlight?
+             if "CRITICAL" in result['vulns']:
+                 self.log_console.append(f"[{timestamp}] [!!!] CRITICAL VULNERABILITY FOUND ON PORT {result['port']}")
 
     def handle_error(self, message):
         QMessageBox.critical(self, "Error", message)
@@ -214,6 +249,7 @@ class MainWindow(QMainWindow):
         self.end_port_input.setEnabled(enable)
         self.scan_type_combo.setEnabled(enable)
         self.show_closed_cb.setEnabled(enable)
+        self.active_probe_cb.setEnabled(enable)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
