@@ -2,7 +2,8 @@ import sys
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QLineEdit, QPushButton, 
                              QTableWidget, QTableWidgetItem, QComboBox, QMessageBox,
-                             QHeaderView, QCheckBox, QFileDialog, QSplitter, QTextEdit)
+                             QHeaderView, QCheckBox, QFileDialog, QSplitter, QTextEdit,
+                             QTabWidget, QFormLayout)
 import csv
 from PyQt5.QtCore import QThread, Qt, QTime
 from PyQt5.QtGui import QColor
@@ -16,9 +17,18 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 800, 600)
         
         # Central Widget & Layout
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        layout = QVBoxLayout(central_widget)
+        self.tabs = QTabWidget()
+        self.setCentralWidget(self.tabs)
+        
+        # --- TAB 1: Port Scanner ---
+        self.scanner_tab = QWidget()
+        layout = QVBoxLayout(self.scanner_tab)
+        self.tabs.addTab(self.scanner_tab, "Port Scanner")
+        
+        # --- TAB 2: Router Fingerprint ---
+        self.router_tab = QWidget()
+        self.setup_router_tab()
+        self.tabs.addTab(self.router_tab, "Router Fingerprint")
         
         # Input Section
         input_layout = QHBoxLayout()
@@ -77,10 +87,10 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(self.export_btn)
         layout.addLayout(btn_layout)
         
-        # Splitter Logic
+        
+        # Results Table & Splitter
         splitter = QSplitter(Qt.Vertical)
         
-        # Results Table
         self.table = QTableWidget()
         self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(["Port", "Status", "Service/Banner", "OS Guess", "Vulnerabilities"])
@@ -236,6 +246,48 @@ class MainWindow(QMainWindow):
              if "CRITICAL" in result['vulns']:
                  self.log_console.append(f"[{timestamp}] [!!!] CRITICAL VULNERABILITY FOUND ON PORT {result['port']}")
 
+    # --- ROUTER FINGERPRINT LOGIC ---
+    def start_fingerprint(self):
+        target = self.router_ip_input.text()
+        if not target:
+             QMessageBox.warning(self, "Input Error", "Please enter a target IP.")
+             return
+
+        self.router_results.clear()
+        self.router_results.append(f"[*] Starting Fingerprint on {target}...\n")
+        self.fingerprint_btn.setEnabled(False)
+        
+        self.fp_thread = QThread()
+        self.fp_worker = scanner.RouterFingerprinter(target)
+        self.fp_worker.moveToThread(self.fp_thread)
+        
+        self.fp_thread.started.connect(self.fp_worker.run)
+        self.fp_worker.log_msg.connect(self.update_router_log)
+        self.fp_worker.finished.connect(self.display_fingerprint)
+        self.fp_worker.finished.connect(self.fp_thread.quit)
+        self.fp_worker.finished.connect(self.fp_worker.deleteLater)
+        self.fp_thread.finished.connect(self.fp_thread.deleteLater)
+        self.fp_thread.finished.connect(lambda: self.fingerprint_btn.setEnabled(True))
+        
+        self.fp_thread.start()
+        
+    def update_router_log(self, msg):
+        self.router_results.append(f"[LOG] {msg}")
+
+    def display_fingerprint(self, results):
+        self.router_results.append("\n" + "="*40)
+        self.router_results.append("       ROUTER FINGERPRINT RESULTS       ")
+        self.router_results.append("="*40 + "\n")
+        
+        self.router_results.append(f"MANUFACTURER:  {results['Manufacturer']}")
+        self.router_results.append(f"OS TYPE:       {results['OS']}")
+        self.router_results.append(f"ADMIN PORT:    {results['Admin Port']}")
+        self.router_results.append(f"TR-069 STATUS: {results['TR-069']}")
+        self.router_results.append("-" * 30)
+        self.router_results.append("DETAILS / HINTS:")
+        for detail in results['Details']:
+            self.router_results.append(f" - {detail}")
+
     def handle_error(self, message):
         QMessageBox.critical(self, "Error", message)
         self.stop_scan()
@@ -250,6 +302,175 @@ class MainWindow(QMainWindow):
         self.scan_type_combo.setEnabled(enable)
         self.show_closed_cb.setEnabled(enable)
         self.active_probe_cb.setEnabled(enable)
+
+    # --- ROUTER FINGERPRINT LOGIC ---
+    def setup_router_tab(self):
+        layout = QVBoxLayout()
+        
+        # Input Area
+        input_layout = QHBoxLayout()
+        self.router_ip_input = QLineEdit()
+        self.router_ip_input.setPlaceholderText("Target Router IP (e.g. 192.168.0.1)")
+        input_layout.addWidget(QLabel("Target:"))
+        input_layout.addWidget(self.router_ip_input)
+        
+        self.fingerprint_btn = QPushButton("Analyze Router")
+        self.fingerprint_btn.clicked.connect(self.start_fingerprint)
+        self.fingerprint_btn.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
+        input_layout.addWidget(self.fingerprint_btn)
+        
+        self.exploit_btn = QPushButton("Exploit UPnP ☠️")
+        self.exploit_btn.setEnabled(False) # Enabled only if UPnP found
+        self.exploit_btn.clicked.connect(self.start_upnp_exploit)
+        self.exploit_btn.setStyleSheet("background-color: #aa0000; color: white; font-weight: bold;")
+        input_layout.addWidget(self.exploit_btn)
+        
+        layout.addLayout(input_layout)
+        
+        # Results Display
+        self.router_results = QTextEdit()
+        self.router_results.setReadOnly(True)
+        self.router_results.setStyleSheet("font-family: Consolas; font-size: 14px; background-color: #2b2b2b; color: #00ff00;")
+        layout.addWidget(self.router_results)
+        
+        self.router_tab.setLayout(layout)
+
+    def start_fingerprint(self):
+        target = self.router_ip_input.text()
+        if not target:
+             QMessageBox.warning(self, "Input Error", "Please enter a target IP.")
+             return
+
+        self.router_results.clear()
+        self.router_results.append(f"[*] Starting Advanced Router Recon on {target}...\n")
+        self.fingerprint_btn.setEnabled(False)
+        
+        # Import new module here if needed or at top
+        import router_recon
+        
+        self.fp_thread = QThread()
+        self.fp_worker = router_recon.RouterRecon(target)
+        self.fp_worker.moveToThread(self.fp_thread)
+        
+        self.fp_thread.started.connect(self.fp_worker.run_all)
+        self.fp_worker.log_msg.connect(self.update_router_log)
+        self.fp_worker.finished.connect(self.display_fingerprint)
+        self.fp_worker.finished.connect(self.fp_thread.quit)
+        self.fp_worker.finished.connect(self.fp_worker.deleteLater)
+        self.fp_thread.finished.connect(self.fp_thread.deleteLater)
+        self.fp_thread.finished.connect(lambda: self.fingerprint_btn.setEnabled(True))
+        
+        self.fp_thread.start()
+        
+    def update_router_log(self, msg):
+        self.router_results.append(f"[LOG] {msg}")
+
+    def display_fingerprint(self, results):
+        self.router_results.append("\n" + "="*50)
+        self.router_results.append("       🕵️  ROUTER RECON AUDIT REPORT  🕵️       ")
+        self.router_results.append("="*50 + "\n")
+        
+        # Vendor & Model
+        self.router_results.append(f"🎯 VENDOR:   {results.get('Vendor', 'Unknown').upper()}")
+        self.router_results.append(f"📦 MODEL:    {results.get('Model', 'Unknown')}")
+        self.router_results.append(f"💾 FIRMWARE: {results.get('Firmware', 'Unknown')}")
+        self.router_results.append("-" * 40)
+        
+        # Critical Issues
+        if results.get("Critical_Issues"):
+             self.router_results.append("🚨 CRITICAL ISSUES DETECTED:")
+             for issue in results["Critical_Issues"]:
+                 self.router_results.append(f"   [!] {issue}")
+        else:
+             self.router_results.append("✅ No Critical Misconfigurations Detected (Basic Check).")
+             
+        self.router_results.append("-" * 40)
+        
+        # Open Ports / Protocols
+        self.router_results.append(f"OPEN PORTS: {results.get('Open_Ports')}")
+        self.router_results.append("PROTOCOLS IDENTIFIED:")
+        for port, proto in results.get("Protocols", {}).items():
+            self.router_results.append(f"   - Port {port}: {proto}")
+            
+        # HTTP Info
+        if results.get("HTTP_Info"):
+             self.router_results.append("\n🌍 HTTP INTELLIGENCE:")
+             self.router_results.append(f"   Title: {results['HTTP_Info'].get('Title', 'N/A')}")
+             if results['HTTP_Info'].get('Hidden_Fields'):
+                 self.router_results.append(f"   Hidden Fields: {len(results['HTTP_Info']['Hidden_Fields'])} found")
+
+        if results.get("Exploits"):
+             self.router_results.append("\n💣 EXPLOIT SURFACE MAPPED:")
+             for exp in results["Exploits"]:
+                 self.router_results.append(f"   [X] {exp}")
+        
+        self.router_results.append("="*50)
+        
+        # Check if UPnP Open to enable Exploit
+        if 1900 in results.get("Protocols", {}):
+            self.exploit_btn.setEnabled(True)
+            self.router_results.append("\n[!] UPnP Detected! Exploit Module Enabled.")
+
+    def start_upnp_exploit(self):
+        target = self.router_ip_input.text()
+        self.router_results.append(f"\n[☠️] LAUNCHING UPnP EXPLOIT on {target}...")
+        self.exploit_btn.setEnabled(False)
+        
+        import router_recon
+        self.exp_thread = QThread()
+        self.exp_worker = router_recon.UPnPExploiter(target)
+        self.exp_worker.moveToThread(self.exp_thread)
+        
+        self.exp_thread.started.connect(self.exp_worker.run_exploit)
+        self.exp_worker.log_msg.connect(self.update_router_log)
+        self.exp_worker.finished.connect(self.exploit_finished)
+        
+        # We need to capture the control_url from the worker if we want to reuse it, 
+        # or we just rely on PostExploit to re-discover or pass it via a property if we modified backend.
+        # Ideally, update backend to signal control_url.
+        # For now, let's just trigger PostExploit. It will likely need to scan again or we pass logic.
+        # Actually simplest: PostExploiter has its own upnp logic or passed control_url.
+        # Update: Let's chain them.
+        
+        self.exp_worker.finished.connect(self.exp_thread.quit)
+        self.exp_worker.finished.connect(self.exp_worker.deleteLater)
+        self.exp_thread.finished.connect(self.exp_thread.deleteLater)
+        # self.exp_thread.finished.connect(lambda: self.exploit_btn.setEnabled(True)) # Don't enable yet, wait for PostExploit
+        
+        self.exp_thread.start()
+
+    def exploit_finished(self, success, msg):
+        self.router_results.append(f"\n[RESULT] {msg}")
+        
+        if success:
+             self.router_results.append("\n[!] Ports Opened! AUTO-RUNNING POST-EXPLOITATION PAYLOADS... 🚀")
+             self.start_post_exploitation()
+        else:
+             self.router_results.append("\n[FAILED] Stopping chain.")
+             self.exploit_btn.setEnabled(True)
+             QMessageBox.warning(self, "Exploit Failed", msg)
+
+    def start_post_exploitation(self):
+        target = self.router_ip_input.text()
+        import router_recon
+        
+        self.post_thread = QThread()
+        self.post_worker = router_recon.PostExploiter(target)
+        self.post_worker.moveToThread(self.post_thread)
+        
+        self.post_thread.started.connect(self.post_worker.run_payloads)
+        self.post_worker.log_msg.connect(self.update_router_log)
+        self.post_worker.finished.connect(self.post_exploit_finished)
+        self.post_worker.finished.connect(self.post_thread.quit)
+        self.post_worker.finished.connect(self.post_worker.deleteLater)
+        self.post_thread.finished.connect(self.post_thread.deleteLater)
+        self.post_thread.finished.connect(lambda: self.exploit_btn.setEnabled(True))
+        
+        self.post_thread.start()
+
+    def post_exploit_finished(self, success, msg):
+        self.router_results.append(f"\n[POST-EXP] {msg}")
+        QMessageBox.information(self, "Attack Chain Complete", "All modules finished.")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

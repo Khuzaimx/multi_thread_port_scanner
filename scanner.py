@@ -513,3 +513,138 @@ class ScannerWorker(QObject):
         Signal the scanner to stop.
         """
         self.is_running = False
+
+class RouterFingerprinter(QObject):
+    finished = pyqtSignal(dict)
+    log_msg = pyqtSignal(str)
+    error = pyqtSignal(str)
+    
+    def __init__(self, target_ip):
+        super().__init__()
+        self.target_ip = target_ip
+        
+    def run(self):
+        """
+        Executes the router fingerprinting process.
+        """
+        results = {
+            "Manufacturer": "Unknown",
+            "OS": "Unknown",
+            "Firmware Hint": "Unknown",
+            "Admin Port": "Unknown",
+            "TR-069": "Closed/Unknown",
+            "Details": []
+        }
+        
+        try:
+            # 1. Check TR-069 (Port 7547)
+            self.log_msg.emit("Checking TR-069 (Port 7547)...")
+            try:
+                with socket.create_connection((self.target_ip, 7547), timeout=2) as sock:
+                     results["TR-069"] = "Open"
+                     sock.send(b"GET / HTTP/1.1\r\nHost: " + self.target_ip.encode() + b"\r\n\r\n")
+                     banner = sock.recv(1024).decode(errors='ignore')
+                     if banner:
+                         results["Details"].append(f"TR-069 Banner: {banner[:50].strip()}")
+            except:
+                pass
+                
+            # 2. Check Admin Ports & Headers
+            target_ports = [80, 443, 8080, 8443]
+            import requests # Ensure requests is available
+            from requests.packages.urllib3.exceptions import InsecureRequestWarning
+            requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+            
+            for port in target_ports:
+                self.log_msg.emit(f"Checking Port {port}...")
+                protocol = "https" if port in [443, 8443] else "http"
+                url = f"{protocol}://{self.target_ip}:{port}"
+                try:
+                    r = requests.get(url, timeout=3, verify=False)
+                    results["Admin Port"] = f"{port} ({protocol.upper()})"
+                    
+                    # Store Headers for analysis
+                    server_header = r.headers.get("Server", "")
+                    metrics = {
+                        "headers": str(r.headers),
+                        "body": r.text,
+                        "title": "",
+                        "realm": r.headers.get("WWW-Authenticate", ""),
+                        "cookie": str(r.cookies)
+                    }
+                    
+                    # Get Title
+                    import re
+                    title_match = re.search(r'<title>(.*?)</title>', r.text, re.IGNORECASE)
+                    if title_match:
+                        metrics["title"] = title_match.group(1)
+                        results["Details"].append(f"Title: {metrics['title']}")
+                        
+                    results["Details"].append(f"Server Header: {server_header}")
+
+                    # 3. Match Signatures
+                    for maker, sigs in utils.ROUTER_SIGNATURES.items():
+                        match_score = 0
+                        # Check Headers
+                        if "headers" in sigs:
+                            for h in sigs["headers"]:
+                                if h.lower() in metrics["headers"].lower():
+                                    match_score += 1
+                        # Check Body
+                        if "body" in sigs:
+                            for b in sigs["body"]:
+                                if b.lower() in metrics["body"].lower():
+                                    match_score += 1
+                        # Check Title
+                        if "title" in sigs:
+                            for t in sigs["title"]:
+                                if t.lower() in metrics["title"].lower():
+                                    match_score += 2
+                        
+                        if match_score > 0:
+                            if results["Manufacturer"] == "Unknown":
+                                results["Manufacturer"] = maker
+                            elif maker not in results["Manufacturer"]:
+                                results["Manufacturer"] += f" / {maker}"
+                                
+                    # 4. OS / Firmware Guess (Header based)
+                    if "VxWorks" in server_header or "RomPager" in server_header:
+                        results["OS"] = "VxWorks"
+                    elif "Linux" in server_header or "uhttpd" in server_header:
+                        results["OS"] = "Linux (Embedded)"
+                    elif "GoAhead" in server_header:
+                        results["OS"] = "Embedded (GoAhead WebServer)"
+                    
+                    # Break on first detailed success
+                    break 
+                    
+                except:
+                    continue
+
+            # 5. TTL Analysis (Using Scapy if available)
+            if results["OS"] == "Unknown":
+                 try:
+                     from scapy.all import IP, TCP, sr1
+                     pkt = IP(dst=self.target_ip) / TCP(dport=80, flags="S")
+                     resp = sr1(pkt, timeout=1, verbose=0)
+                     if resp and resp.haslayer(IP):
+                         ttl = resp.getlayer(IP).ttl
+                         os_hint = self.guess_os_from_ttl(ttl)
+                         results["OS"] += f" (TTL: {ttl} -> {os_hint})"
+                 except:
+                     pass
+
+            self.finished.emit(results)
+            
+        except Exception as e:
+            self.error.emit(str(e))
+    
+    def guess_os_from_ttl(self, ttl):
+         if ttl <= 64:
+            return "Linux/Unix"
+         elif ttl <= 128:
+            return "Windows"
+         elif ttl <= 255:
+            return "Cisco/Network Device"
+         else:
+            return "Unknown"
